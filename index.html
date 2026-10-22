@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="referrer" content="no-referrer">
+<title>RuTube Soft</title>
+<style>
+  :root { --bg: #f5f5f5; --surface: #fff; --text: #1f1e1c; --muted: #8a857e; --accent: #0e6a86; --err: #b0284a; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #141414; --surface: #1f1e1c; --text: #ecebe8; --muted: #9c978f; --accent: #44b8d8; --err: #ec6b8a; } }
+  :root.dark { --bg: #141414; --surface: #1f1e1c; --text: #ecebe8; --muted: #9c978f; --accent: #44b8d8; --err: #ec6b8a; }
+  :root.light { --bg: #f5f5f5; --surface: #fff; --text: #1f1e1c; --muted: #8a857e; --accent: #0e6a86; --err: #b0284a; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 500 16px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { min-height: 100%; display: grid; place-items: center; padding: 24px 16px; }
+  .card { width: min(420px, 100%); display: grid; justify-items: center; gap: 10px; padding: 32px 20px; border-radius: 24px; background: var(--surface); text-align: center; }
+  .orb { width: 72px; height: 72px; border-radius: 50%; display: grid; place-items: center; background: color-mix(in srgb, var(--accent) 16%, var(--surface)); color: var(--accent); animation: breathe 1.6s ease-in-out infinite; }
+  .orb svg { width: 32px; height: 32px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  .orb.err { background: color-mix(in srgb, var(--err) 16%, var(--surface)); color: var(--err); animation: none; }
+  @keyframes breathe { 50% { transform: scale(1.08); } }
+  b { font-size: 18px; }
+  .muted { color: var(--muted); font-size: 14px; }
+  button { margin-top: 8px; height: 44px; padding: 0 22px; border: 0; border-radius: 999px; background: var(--text); color: var(--bg); font: inherit; font-weight: 700; cursor: pointer; }
+  button[hidden] { display: none; }
+  @media (prefers-reduced-motion: reduce) { .orb { animation: none; } }
+</style>
+</head>
+<body>
+<main>
+  <div class="card">
+    <div class="orb" id="orb"><svg viewBox="0 0 24 24"><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/></svg></div>
+    <b id="title">Открываю RuTube Soft…</b>
+    <span class="muted" id="sub">ищу компьютер с программой</span>
+    <button id="retry" hidden>Повторить</button>
+  </div>
+</main>
+<script>
+// Постоянный адрес мини-приложения RuTube Soft. Программа на ПК публикует текущий адрес туннеля
+// в канал ntfy, подписав его своим ключом. Здесь — только открытый ключ: открываем лишь адрес
+// с верной подписью, чтобы вход через Telegram не ушёл на чужой сайт.
+(() => {
+  "use strict";
+  const TOPIC = "rts-e9106e718060544f106faf9b";
+  const PUBLIC_KEY = "BCU/Diy135qYFAhoqcEEFJCQsAtdj62MpVovQsTLdpRXBxYDKo9eOH0q0XHiJ1mxCduy4z8BBhkg0EkrkHSroks=";
+  const MAX_AGE_SEC = 7200;
+  const ALLOWED = /^https:\/\/[a-z0-9-]+\.(trycloudflare\.com|lhr\.life)$/;
+
+  // тема Telegram (передаётся в адресе) — чтобы не мигнуть белым в тёмной теме
+  try {
+    const p = new URLSearchParams(location.hash.slice(1)).get("tgWebAppThemeParams");
+    const bg = p && JSON.parse(p).bg_color;
+    if (bg) {
+      const n = parseInt(bg.slice(1), 16), lum = ((n >> 16) & 255) * .299 + ((n >> 8) & 255) * .587 + (n & 255) * .114;
+      document.documentElement.className = lum < 128 ? "dark" : "light";
+    }
+  } catch (e) { /* без темы */ }
+
+  const $ = (id) => document.getElementById(id);
+  const fromB64 = (s) => Uint8Array.from(atob(s.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((s.length + 3) % 4)), (c) => c.charCodeAt(0));
+
+  function fail(title, sub) {
+    $("orb").classList.add("err");
+    $("title").textContent = title;
+    $("sub").textContent = sub;
+    $("retry").hidden = false;
+  }
+
+  async function find() {
+    const key = await crypto.subtle.importKey("raw", fromB64(PUBLIC_KEY), { name: "ECDSA", namedCurve: "P-256" }, false, ["verify"]);
+    const res = await fetch(`https://ntfy.sh/${TOPIC}/json?poll=1&since=all`, { cache: "no-store" });
+    let best = null;
+    for (const line of (await res.text()).split("\n")) {
+      try {
+        const p = JSON.parse(JSON.parse(line).message || "");
+        if (!p || !ALLOWED.test(p.u) || Date.now() / 1000 - p.t > MAX_AGE_SEC) continue;
+        const ok = await crypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, key, fromB64(p.s), new TextEncoder().encode(`${p.u}|${p.t}`));
+        if (ok && (!best || p.t >= best.t)) best = p;
+      } catch (e) { /* не наша строка */ }
+    }
+    return best && best.u;
+  }
+
+  async function go() {
+    $("retry").hidden = true;
+    $("orb").classList.remove("err");
+    $("title").textContent = "Открываю RuTube Soft…";
+    $("sub").textContent = "ищу компьютер с программой";
+    try {
+      const url = await find();
+      if (!url) return fail("Программа на компьютере не запущена", "Включите компьютер и запустите RuTube Soft — через минуту приложение откроется");
+      location.replace(url + "/tg/" + location.hash);
+    } catch (e) {
+      fail("Нет связи", "Не получилось узнать адрес компьютера. Проверьте интернет и нажмите «Повторить»");
+    }
+  }
+
+  $("retry").onclick = go;
+  go();
+})();
+</script>
+</body>
+</html>
