@@ -36,7 +36,7 @@
 </main>
 <script>
 // Постоянный адрес мини-приложения RuTube Soft. Программа на ПК публикует текущий адрес туннеля
-// в канал ntfy, подписав его своим ключом. Здесь — только открытый ключ: открываем лишь адрес
+// через независимые каналы, подписав его своим ключом. Здесь — только открытый ключ: открываем лишь адрес
 // с верной подписью, чтобы вход через Telegram не ушёл на чужой сайт.
 (() => {
   "use strict";
@@ -67,18 +67,61 @@
 
   async function find() {
     const key = await crypto.subtle.importKey("raw", fromB64(PUBLIC_KEY), { name: "ECDSA", namedCurve: "P-256" }, false, ["verify"]);
-    const res = await fetch(`https://ntfy.sh/${TOPIC}/json?poll=1&since=all`, { cache: "no-store" });
-    let best = null;
-    for (const line of (await res.text()).split("\n")) {
+    const raw = "https://raw.githubusercontent.com/zzplyy/rutube-soft-app/main/";
+    const api = "https://api.github.com/repos/zzplyy/rutube-soft-app/contents/";
+    const names = ["pointer-main.json", "pointer-backup.json"];
+    async function load(url, ndjson = false, rawApi = false) {
+      const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), 6500);
       try {
-        const p = JSON.parse(JSON.parse(line).message || "");
-        if (!p || !ALLOWED.test(p.u) || Date.now() / 1000 - p.t > MAX_AGE_SEC) continue;
-        const ok = await crypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, key, fromB64(p.s), new TextEncoder().encode(`${p.u}|${p.t}`));
-        if (ok && (!best || p.t >= best.t)) best = p;
-      } catch (e) { /* не наша строка */ }
+        const res = await fetch(url, { cache: "no-store", credentials: "omit", signal: ctl.signal,
+          headers: rawApi ? { Accept: "application/vnd.github.raw+json" } : {} });
+        if (!res.ok) return [];
+        const text = await res.text();
+        if (ndjson) return text.split("\n").flatMap(line => {
+          try { return [JSON.parse(JSON.parse(line).message || "")]; } catch (e) { return []; }
+        });
+        let p = JSON.parse(text);
+        if (p.encoding === "base64" && typeof p.content === "string") p = JSON.parse(atob(p.content.replace(/\s/g, "")));
+        return [p];
+      } catch (e) { return []; }
+      finally { clearTimeout(timer); }
     }
-    return best && best.u;
+    async function choose(rows) {
+      const good = [];
+      for (const p of rows) {
+        try {
+          if (!p || !ALLOWED.test(p.u) || !Number.isSafeInteger(p.t) ||
+              Date.now() / 1000 - p.t > MAX_AGE_SEC || p.t > Date.now() / 1000 + 60) continue;
+          if (await crypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, key, fromB64(p.s),
+              new TextEncoder().encode(`${p.u}|${p.t}`))) good.push(p);
+        } catch (e) { /* unsigned or malformed address */ }
+      }
+      const seen = new Set();
+      for (const p of good.sort((a, b) => b.t - a.t)) {
+        if (seen.has(p.u)) continue;
+        seen.add(p.u);
+        const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), 5500);
+        try {
+          const health = await fetch(p.u + "/tg/health", { cache: "no-store", credentials: "omit",
+            redirect: "error", signal: ctl.signal });
+          if (health.ok && (await health.text()) === "ok") return p.u;
+        } catch (e) { /* tunnel has changed: try another verified address */ }
+        finally { clearTimeout(timer); }
+      }
+      return null;
+    }
+    const first = await Promise.all([
+      load(`https://ntfy.sh/${TOPIC}/json?poll=1&since=all&_=${Date.now()}`, true),
+      ...names.map(name => load(raw + name + "?_=" + Date.now()))
+    ]);
+    const live = await choose(first.flat());
+    if (live) return live;
+    // A raw CDN response can still contain an old pointer. Read the current Git
+    // contents only after those addresses failed their health check.
+    const current = await Promise.all(names.map(name => load(api + name + "?ref=main&_=" + Date.now(), false, true)));
+    return choose(current.flat());
   }
+
 
   async function go() {
     $("retry").hidden = true;
@@ -87,7 +130,7 @@
     $("sub").textContent = "ищу компьютер с программой";
     try {
       const url = await find();
-      if (!url) return fail("Программа на компьютере не запущена", "Включите компьютер и запустите RuTube Soft — через минуту приложение откроется");
+      if (!url) return fail("Нет связи с приложением", "Внешний адрес временно недоступен. Повторите подключение чуть позже");
       location.replace(url + "/tg/" + location.hash);
     } catch (e) {
       fail("Нет связи", "Не получилось узнать адрес компьютера. Проверьте интернет и нажмите «Повторить»");
